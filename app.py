@@ -1,111 +1,8 @@
-import json
-from typing import List, Dict, Any
-
 import requests
 import streamlit as st
 from bs4 import BeautifulSoup
-from groq import Groq
-import gspread
-from google.oauth2.service_account import Credentials
 
-# 1. Setup Groq (Key is stored in Streamlit Secrets)
-client = Groq(api_key=st.secrets["GROQ_API_KEY"])
-
-# 2. Google Sheets configuration
-GOOGLE_SHEET_ID = "1VrcsNcyws6wh3ioP9Q_ZNS3PpS1UcbcXZRq3sUxFXvI"
-GOOGLE_SHEET_RANGE = "Sheet1"  # adjust if your sheet/tab name is different
-
-
-def get_gsheet_client() -> gspread.Client:
-    """
-    Create an authenticated gspread client using a service account JSON
-    stored in Streamlit secrets under key 'GCP_SERVICE_ACCOUNT'.
-    """
-    service_info = st.secrets.get("GCP_SERVICE_ACCOUNT")
-    if not service_info:
-        raise RuntimeError(
-            "GCP_SERVICE_ACCOUNT not found in Streamlit secrets. "
-            "Add your Google service account JSON under that key."
-        )
-
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive",
-    ]
-    creds = Credentials.from_service_account_info(service_info, scopes=scopes)
-    return gspread.authorize(creds)
-
-
-def load_cached_articles() -> List[Dict[str, Any]]:
-    """
-    Load previously saved articles from the Google Sheet.
-    Returns a list of dicts with keys: title, link, summary.
-    """
-    try:
-        client = get_gsheet_client()
-        sh = client.open_by_key(GOOGLE_SHEET_ID)
-        # Use the first worksheet or a named one
-        try:
-            ws = sh.worksheet(GOOGLE_SHEET_RANGE)
-        except gspread.WorksheetNotFound:
-            ws = sh.sheet1
-
-        rows = ws.get_all_records()
-        articles: List[Dict[str, Any]] = []
-        for row in rows:
-            articles.append(
-                {
-                    "title": row.get("title") or row.get("Title") or "",
-                    "link": row.get("link") or row.get("Link") or "",
-                    "summary": row.get("summary") or row.get("Summary") or "",
-                }
-            )
-        return articles
-    except Exception as e:
-        st.warning(f"Could not load cached data from Google Sheet: {e}")
-        return []
-
-
-def save_articles_to_sheet(articles: List[Dict[str, Any]]) -> None:
-    """
-    Save the given list of article dicts into the Google Sheet,
-    overwriting existing content.
-    """
-    try:
-        client = get_gsheet_client()
-        sh = client.open_by_key(GOOGLE_SHEET_ID)
-        try:
-            ws = sh.worksheet(GOOGLE_SHEET_RANGE)
-        except gspread.WorksheetNotFound:
-            ws = sh.add_worksheet(title=GOOGLE_SHEET_RANGE, rows="1000", cols="3")
-
-        # Prepare data: header row + data rows
-        header = ["title", "link", "summary"]
-        values = [header]
-        for a in articles:
-            values.append(
-                [
-                    a.get("title", ""),
-                    a.get("link", ""),
-                    a.get("summary", ""),
-                ]
-            )
-
-        ws.clear()
-        ws.update("A1", values)
-    except Exception as e:
-        st.warning(f"Could not save data to Google Sheet: {e}")
-
-def scrape_vnexpress():
-    # Targets the 'World' and 'Tech' sections
-    urls = ["https://vnexpress.net/the-gioi", "https://vnexpress.net/so-hoa"]
-    news_data = []
-    for url in urls:
-        res = requests.get(url)
-        soup = BeautifulSoup(res.text, "html.parser")
-        for item in soup.select("h3.title-news a")[:10]:
-            news_data.append({"title": item.text.strip(), "link": item["href"]})
-    return news_data
+from scan import load_cached_articles, run_scan
 
 
 def scrape_article_body(url: str) -> str:
@@ -139,36 +36,8 @@ def scrape_article_body(url: str) -> str:
     text = "\n\n".join(p for p in paragraphs if p)
     return text.strip()
 
-def ai_filter_news(raw_news):
-    prompt = (
-        "From the following list of news items (each with a title and link), "
-        "identify only stories related to either Artificial Intelligence (AI) "
-        "or Iran/US conflict.\n\n"
-        f"NEWS_LIST:\n{raw_news}\n\n"
-        "Return ONLY a valid JSON array (no markdown, no explanation) with this shape:\n"
-        '[{"title": "...", "link": "...", "summary": "..."}]'
-    )
 
-    completion = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[{"role": "user", "content": prompt}],
-    )
-    content = completion.choices[0].message.content.strip()
-
-    if content.startswith("```"):
-        lines = content.splitlines()
-        content = "\n".join(line for line in lines if not line.strip().startswith("```"))
-
-    try:
-        data = json.loads(content)
-        if isinstance(data, list):
-            return data
-    except json.JSONDecodeError:
-        pass
-
-    return []
-
-# 2. UI Layout
+# UI Layout
 st.set_page_config(page_title="AI & War News Scout", page_icon="🤖")
 
 # Fix font so Vietnamese and other scripts render correctly
@@ -199,17 +68,19 @@ if "selected_index" not in st.session_state:
 
 # On first load, try to populate from Google Sheet cache
 if not st.session_state.articles:
-    cached = load_cached_articles()
-    if cached:
-        st.session_state.articles = cached
+    gcp = st.secrets.get("GCP_SERVICE_ACCOUNT")
+    if gcp:
+        cached = load_cached_articles(gcp)
+        if cached:
+            st.session_state.articles = cached
 
 if st.button("Scan Today's News"):
-    # Always fetch fresh data from the internet + LLM and update the sheet
-    with st.spinner("Scraping VnExpress & CafeF and calling LLM..."):
-        raw_data = scrape_vnexpress()
-        articles = ai_filter_news(raw_data)
+    with st.spinner("Scraping VnExpress & calling LLM..."):
+        articles = run_scan(
+            st.secrets["GROQ_API_KEY"],
+            st.secrets.get("GCP_SERVICE_ACCOUNT"),
+        )
         st.session_state.articles = articles
-        save_articles_to_sheet(articles)
 
     st.success("Feed refreshed from web + LLM and cached to Google Sheets.")
     st.session_state.view = "list"

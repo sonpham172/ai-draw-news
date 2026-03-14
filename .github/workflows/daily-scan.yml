@@ -1,9 +1,9 @@
-# Run daily at 9:00 AM Vietnam (UTC+7) = 2:00 AM UTC
+# Run daily at 13:00 (1:00 PM) Vietnam (UTC+7) = 6:00 AM UTC
 name: Daily news scan
 
 on:
   schedule:
-    - cron: "0 2 * * *"
+    - cron: "0 6 * * *"
   workflow_dispatch:
 
 jobs:
@@ -24,4 +24,4 @@ jobs:
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GCP_SERVICE_ACCOUNT_JSON: ${{ secrets.GCP_SA_JSON }}
-        run: python scripts/daily_scan.py
+        run: python run_scan.py
