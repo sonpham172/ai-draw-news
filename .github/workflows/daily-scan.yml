@@ -1,0 +1,27 @@
+# Run daily at 9:00 AM Vietnam (UTC+7) = 2:00 AM UTC
+name: Daily news scan
+
+on:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run daily scan
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GCP_SERVICE_ACCOUNT_JSON: ${{ secrets.GCP_SA_JSON }}
+        run: python scripts/daily_scan.py
