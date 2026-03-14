@@ -45,10 +45,10 @@ st.markdown(
     """
     <link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
-      html, body, [class*="css"] {
+      html, body {
         font-family: 'Be Vietnam Pro', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important;
       }
-      .stMarkdown, .stMarkdown p {
+      .stMarkdown, .stMarkdown p, .stText, .stCaption {
         font-family: 'Be Vietnam Pro', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important;
         word-wrap: break-word;
         overflow-wrap: break-word;
