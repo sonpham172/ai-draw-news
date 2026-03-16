@@ -2,7 +2,7 @@ import requests
 import streamlit as st
 from bs4 import BeautifulSoup
 
-from scan import load_cached_articles, run_scan
+from scan import load_cached_articles, load_config_from_sheet, run_scan
 
 
 def scrape_article_body(url: str) -> str:
@@ -71,14 +71,24 @@ if not st.session_state.articles:
     gcp = st.secrets.get("GCP_SERVICE_ACCOUNT")
     if gcp:
         cached = load_cached_articles(gcp)
+        cached_cat = load_config_from_sheet(gcp)
+        st.session_state.categories_str = cached_cat
         if cached:
             st.session_state.articles = cached
+
+cat_input = st.text_input(
+    "Categories (e.g., sport, bank, AI)",
+    value=st.session_state.get("categories_str", ""),
+    help="Leave empty for default (Artificial Intelligence (AI) or Iran/US conflict)",
+)
+st.session_state.categories_str = cat_input
 
 if st.button("Scan Today's News"):
     with st.spinner("Scraping VnExpress & calling LLM..."):
         articles = run_scan(
             st.secrets["GROQ_API_KEY"],
             st.secrets.get("GCP_SERVICE_ACCOUNT"),
+            categories_str=st.session_state.get("categories_str", "")
         )
         st.session_state.articles = articles
 

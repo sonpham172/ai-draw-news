@@ -1,9 +1,9 @@
-# Run daily at 13:00 (1:00 PM) Vietnam (UTC+7) = 6:00 AM UTC
+# Run daily at 7:00 AM Vietnam (UTC+7) = 0:00 AM UTC
 name: Daily news scan
 
 on:
   schedule:
-    - cron: "30 10 * * *"
+    - cron: "0 0 * * *"
   workflow_dispatch:
 
 jobs:

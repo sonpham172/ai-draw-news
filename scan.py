@@ -4,7 +4,7 @@ No Streamlit dependency; used by app.py and run_scan.py CLI.
 """
 import json
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 import requests
 from bs4 import BeautifulSoup
@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 GOOGLE_SHEET_ID = "1VrcsNcyws6wh3ioP9Q_ZNS3PpS1UcbcXZRq3sUxFXvI"
 GOOGLE_SHEET_RANGE = "Sheet1"
+GOOGLE_SHEET_CONFIG_RANGE = "Config"
 
 
 def get_gsheet_client(service_account_info: dict) -> gspread.Client:
@@ -64,6 +65,42 @@ def load_cached_articles(service_account_info: dict) -> List[Dict[str, Any]]:
         return []
 
 
+def load_config_from_sheet(service_account_info: dict) -> str:
+    """Load the last searched category from the Config sheet."""
+    try:
+        client = get_gsheet_client(service_account_info)
+        sh = client.open_by_key(GOOGLE_SHEET_ID)
+        try:
+            ws = sh.worksheet(GOOGLE_SHEET_CONFIG_RANGE)
+        except gspread.WorksheetNotFound:
+            return ""
+        
+        records = ws.get_all_records()
+        for row in records:
+            if row.get("Key") == "categories":
+                return str(row.get("Value") or "")
+        return ""
+    except Exception as e:
+        logger.warning("Could not load config from Google Sheet: %s", e)
+        return ""
+
+
+def save_config_to_sheet(categories_str: str, service_account_info: dict) -> None:
+    """Save the current categories string to the Config sheet."""
+    try:
+        client = get_gsheet_client(service_account_info)
+        sh = client.open_by_key(GOOGLE_SHEET_ID)
+        try:
+            ws = sh.worksheet(GOOGLE_SHEET_CONFIG_RANGE)
+        except gspread.WorksheetNotFound:
+            ws = sh.add_worksheet(title=GOOGLE_SHEET_CONFIG_RANGE, rows="10", cols="2")
+        
+        ws.clear()
+        ws.update("A1", [["Key", "Value"], ["categories", categories_str]])
+    except Exception as e:
+        logger.warning("Could not save config to Google Sheet: %s", e)
+
+
 def save_articles_to_sheet(
     articles: List[Dict[str, Any]], service_account_info: dict
 ) -> None:
@@ -97,8 +134,15 @@ def save_articles_to_sheet(
 
 
 def scrape_vnexpress() -> List[Dict[str, str]]:
-    """Scrape VNExpress World and Tech sections for headline links."""
-    urls = ["https://vnexpress.net/the-gioi", "https://vnexpress.net/so-hoa"]
+    """Scrape various VNExpress sections for headline links."""
+    urls = [
+        "https://vnexpress.net/the-thao",
+        "https://vnexpress.net/kinh-doanh",
+        "https://vnexpress.net/the-gioi",
+        "https://vnexpress.net/so-hoa",
+        "https://vnexpress.net/thoi-su",
+        "https://vnexpress.net/giai-tri",
+    ]
     news_data = []
     for url in urls:
         res = requests.get(url)
@@ -108,19 +152,19 @@ def scrape_vnexpress() -> List[Dict[str, str]]:
     return news_data
 
 
-def ai_filter_news(raw_news: List[Dict[str, str]], groq_client: Groq) -> List[Dict[str, Any]]:
-    """Use Groq LLM to filter raw news to AI and Iran/US conflict stories; return list of dicts with title, link, summary."""
+def ai_filter_news(raw_news: List[Dict[str, str]], groq_client: Groq, categories_str: str) -> List[Dict[str, Any]]:
+    """Use Groq LLM to filter raw news based on categories; return list of dicts with title, link, summary."""
+    target_topics = categories_str if categories_str else "Artificial Intelligence (AI) or Iran/US conflict"
     prompt = (
         "From the following list of news items (each with a title and link), "
-        "identify only stories related to either Artificial Intelligence (AI) "
-        "or Iran/US conflict.\n\n"
+        f"identify only stories related to: {target_topics}.\n\n"
         f"NEWS_LIST:\n{raw_news}\n\n"
         "Return ONLY a valid JSON array (no markdown, no explanation) with this shape:\n"
         '[{"title": "...", "link": "...", "summary": "..."}]'
     )
 
     completion = groq_client.chat.completions.create(
-        model="llama-3.1-8b-instant",
+        model="llama-3.3-70b-versatile",
         messages=[{"role": "user", "content": prompt}],
     )
     content = completion.choices[0].message.content.strip()
@@ -139,7 +183,11 @@ def ai_filter_news(raw_news: List[Dict[str, str]], groq_client: Groq) -> List[Di
     return []
 
 
-def run_scan(groq_api_key: str, gcp_service_account: dict) -> List[Dict[str, Any]]:
+def run_scan(
+    groq_api_key: str,
+    gcp_service_account: dict,
+    categories_str: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     """
     Run the full scan pipeline: scrape VNExpress, filter with LLM, save to Google Sheet.
     Returns the list of articles. Raises on missing config; logs warnings for sheet I/O errors.
@@ -149,8 +197,13 @@ def run_scan(groq_api_key: str, gcp_service_account: dict) -> List[Dict[str, Any
     if not gcp_service_account:
         raise RuntimeError("GCP_SERVICE_ACCOUNT is required.")
 
+    if categories_str is None:
+        categories_str = load_config_from_sheet(gcp_service_account)
+
     client = Groq(api_key=groq_api_key)
     raw_data = scrape_vnexpress()
-    articles = ai_filter_news(raw_data, client)
+    articles = ai_filter_news(raw_data, client, categories_str)
     save_articles_to_sheet(articles, gcp_service_account)
+    if categories_str is not None:
+        save_config_to_sheet(categories_str, gcp_service_account)
     return articles
