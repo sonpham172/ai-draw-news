@@ -39,7 +39,7 @@ def get_gsheet_client(service_account_info: dict) -> gspread.Client:
 def load_cached_articles(service_account_info: dict) -> List[Dict[str, Any]]:
     """
     Load previously saved articles from the Google Sheet.
-    Returns a list of dicts with keys: title, link, summary.
+    Returns a list of dicts with keys: title, link, summary, image_url, source.
     """
     try:
         client = get_gsheet_client(service_account_info)
@@ -57,6 +57,8 @@ def load_cached_articles(service_account_info: dict) -> List[Dict[str, Any]]:
                     "title": row.get("title") or row.get("Title") or "",
                     "link": row.get("link") or row.get("Link") or "",
                     "summary": row.get("summary") or row.get("Summary") or "",
+                    "image_url": row.get("image_url") or row.get("Image") or "",
+                    "source": row.get("source") or row.get("Source") or "",
                 }
             )
         return articles
@@ -114,9 +116,9 @@ def save_articles_to_sheet(
         try:
             ws = sh.worksheet(GOOGLE_SHEET_RANGE)
         except gspread.WorksheetNotFound:
-            ws = sh.add_worksheet(title=GOOGLE_SHEET_RANGE, rows="1000", cols="3")
+            ws = sh.add_worksheet(title=GOOGLE_SHEET_RANGE, rows="1000", cols="5")
 
-        header = ["title", "link", "summary"]
+        header = ["title", "link", "summary", "image_url", "source"]
         values = [header]
         for a in articles:
             values.append(
@@ -124,6 +126,8 @@ def save_articles_to_sheet(
                     a.get("title", ""),
                     a.get("link", ""),
                     a.get("summary", ""),
+                    a.get("image_url", ""),
+                    a.get("source", ""),
                 ]
             )
 
@@ -134,7 +138,7 @@ def save_articles_to_sheet(
 
 
 def scrape_vnexpress() -> List[Dict[str, str]]:
-    """Scrape various VNExpress sections for headline links."""
+    """Scrape VNExpress for headline links with images and source."""
     urls = [
         "https://vnexpress.net/the-thao",
         "https://vnexpress.net/kinh-doanh",
@@ -145,22 +149,111 @@ def scrape_vnexpress() -> List[Dict[str, str]]:
     ]
     news_data = []
     for url in urls:
-        res = requests.get(url)
-        soup = BeautifulSoup(res.text, "html.parser")
-        for item in soup.select("h3.title-news a")[:10]:
-            news_data.append({"title": item.text.strip(), "link": item["href"]})
+        try:
+            res = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+            res.raise_for_status()
+            soup = BeautifulSoup(res.text, "html.parser")
+            for item in soup.select("h3.title-news a")[:10]:
+                title = item.text.strip()
+                href = item.get("href", "")
+                
+                # Find associated image
+                parent = item.find_parent("div")
+                img = parent.find("img") if parent else None
+                img_src = img.get("data-src") or img.get("src") if img else ""
+                
+                if href:
+                    news_data.append({
+                        "title": title,
+                        "link": href,
+                        "image_url": img_src,
+                        "source": "VNExpress",
+                    })
+        except Exception as e:
+            logger.warning("Could not scrape VNExpress (%s): %s", url, e)
+    return news_data
+
+def scrape_tuoitre() -> List[Dict[str, str]]:
+    """Scrape Tuoi Tre for headline links with images and source."""
+    urls = [
+        "https://tuoitre.vn/thoi-su.htm",
+        "https://tuoitre.vn/kinh-doanh.htm",
+        "https://tuoitre.vn/the-thao.htm",
+        "https://tuoitre.vn/van-hoa.htm",
+        "https://tuoitre.vn/khoa-hoc.htm",
+    ]
+    news_data = []
+    for url in urls:
+        try:
+            res = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+            res.raise_for_status()
+            soup = BeautifulSoup(res.text, "html.parser")
+            for item in soup.select("li.content-item__item--image a.content-item__title")[:10]:
+                title = item.text.strip()
+                href = "https://tuoitre.vn" + item.get("href", "")
+                
+                # Find associated image
+                parent = item.find_parent("li")
+                img = parent.select_one("a.content-item__thumb img") if parent else None
+                img_src = img.get("src") if img else ""
+                
+                if href:
+                    news_data.append({
+                        "title": title,
+                        "link": href,
+                        "image_url": img_src,
+                        "source": "TuoiTre",
+                    })
+        except Exception as e:
+            logger.warning("Could not scrape Tuoi Tre (%s): %s", url, e)
+    return news_data
+
+def scrape_cafef() -> List[Dict[str, str]]:
+    """Scrape CafeF for headline links with images and source."""
+    urls = [
+        "https://cafef.vn/thoi-su.chn",
+        "https://cafef.vn/kinh-doanh.chn",
+        "https://cafef.vn/thi-truong-chung-khoan.chn",
+        "https://cafef.vn/bat-dong-san.chn",
+        "https://cafef.vn/doanh-nghiep.chn",
+    ]
+    news_data = []
+    for url in urls:
+        try:
+            res = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+            res.raise_for_status()
+            soup = BeautifulSoup(res.text, "html.parser")
+            for item in soup.select(".tlitem h3 a")[:10]:
+                title = item.text.strip()
+                href = "https://cafef.vn" + item.get("href", "") if item.get("href", "").startswith("/") else item.get("href", "")
+                
+                # Find associated image (CafeF often has images directly within or near the .tlitem)
+                parent = item.find_parent(".tlitem")
+                img = parent.select_one("img.thumb") if parent else None # Adjust image selector for CafeF
+                img_src = img.get("src") if img else ""
+                
+                if href:
+                    news_data.append({
+                        "title": title,
+                        "link": href,
+                        "image_url": img_src,
+                        "source": "CafeF",
+                    })
+        except Exception as e:
+            logger.warning("Could not scrape CafeF (%s): %s", url, e)
     return news_data
 
 
 def ai_filter_news(raw_news: List[Dict[str, str]], groq_client: Groq, categories_str: str) -> List[Dict[str, Any]]:
-    """Use Groq LLM to filter raw news based on categories; return list of dicts with title, link, summary."""
+    """Use Groq LLM to filter raw news based on categories; return list of dicts with title, link, summary, image_url, source."""
     target_topics = categories_str if categories_str else "Artificial Intelligence (AI) or Iran/US conflict"
     prompt = (
-        "From the following list of news items (each with a title and link), "
+        "From the following list of news items (each with title, link, image_url, source), "
         f"identify only stories related to: {target_topics}.\n\n"
         f"NEWS_LIST:\n{raw_news}\n\n"
+        "For each selected story, create a brief summary (1-2 sentences).\n"
         "Return ONLY a valid JSON array (no markdown, no explanation) with this shape:\n"
-        '[{"title": "...", "link": "...", "summary": "..."}]'
+        "[{\"title\": \"...\", \"link\": \"...\", \"summary\": \"...\", \"image_url\": \"...\", \"source\": \"...\"}]"
     )
 
     completion = groq_client.chat.completions.create(
@@ -201,8 +294,13 @@ def run_scan(
         categories_str = load_config_from_sheet(gcp_service_account)
 
     client = Groq(api_key=groq_api_key)
-    raw_data = scrape_vnexpress()
-    articles = ai_filter_news(raw_data, client, categories_str)
+    
+    all_raw_data = []
+    all_raw_data.extend(scrape_vnexpress())
+    all_raw_data.extend(scrape_tuoitre())
+    all_raw_data.extend(scrape_cafef())
+    
+    articles = ai_filter_news(all_raw_data, client, categories_str)
     save_articles_to_sheet(articles, gcp_service_account)
     if categories_str is not None:
         save_config_to_sheet(categories_str, gcp_service_account)
