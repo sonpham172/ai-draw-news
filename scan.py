@@ -257,7 +257,7 @@ def ai_filter_news(raw_news: List[Dict[str, str]], groq_client: Groq, categories
     )
 
     completion = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model="llama-3.1-8b-instant",
         messages=[{"role": "user", "content": prompt}],
     )
     content = completion.choices[0].message.content.strip()
