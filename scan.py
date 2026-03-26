@@ -247,17 +247,21 @@ def scrape_cafef() -> List[Dict[str, str]]:
 def ai_filter_news(raw_news: List[Dict[str, str]], groq_client: Groq, categories_str: str) -> List[Dict[str, Any]]:
     """Use Groq LLM to filter raw news based on categories; return list of dicts with title, link, summary, image_url, source."""
     target_topics = categories_str if categories_str else "Artificial Intelligence (AI) or Iran/US conflict"
+    
+    # Limit raw_news to avoid hitting token limits
+    limited_raw_news = raw_news[:10]  # Take the first 10 articles
+
     prompt = (
         "From the following list of news items (each with title, link, image_url, source), "
         f"identify only stories related to: {target_topics}.\n\n"
-        f"NEWS_LIST:\n{raw_news}\n\n"
+        f"NEWS_LIST:\n{limited_raw_news}\n\n"
         "For each selected story, create a brief summary (1-2 sentences).\n"
         "Return ONLY a valid JSON array (no markdown, no explanation) with this shape:\n"
         "[{\"title\": \"...\", \"link\": \"...\", \"summary\": \"...\", \"image_url\": \"...\", \"source\": \"...\"}]"
     )
 
     completion = groq_client.chat.completions.create(
-        model="llama-3.1-8b-instant",
+        model="llama-3.1-8b-instant", # Changed to llama-3.1-8b-instant as per user request
         messages=[{"role": "user", "content": prompt}],
     )
     content = completion.choices[0].message.content.strip()
