@@ -2,7 +2,7 @@ import requests
 import streamlit as st
 from bs4 import BeautifulSoup
 
-from scan import load_cached_articles, load_config_from_sheet, run_scan
+from scan import load_cached_articles, load_config_from_hf, run_scan
 
 
 def scrape_article_body(url: str) -> str:
@@ -66,12 +66,15 @@ if "articles" not in st.session_state:
 if "selected_index" not in st.session_state:
     st.session_state.selected_index = None
 
-# On first load, try to populate from Google Sheet cache
+# HF Secrets
+hf_token = st.secrets.get("HF_TOKEN")
+hf_repo_id = st.secrets.get("HF_REPO_ID", "sonpham172/news-data")
+
+# On first load, try to populate from HF cache
 if not st.session_state.articles:
-    gcp = st.secrets.get("GCP_SERVICE_ACCOUNT")
-    if gcp:
-        cached = load_cached_articles(gcp)
-        cached_cat = load_config_from_sheet(gcp)
+    if hf_token:
+        cached = load_cached_articles(hf_token, hf_repo_id)
+        cached_cat = load_config_from_hf(hf_token, hf_repo_id)
         st.session_state.categories_str = cached_cat
         if cached:
             st.session_state.articles = cached
@@ -84,15 +87,24 @@ cat_input = st.text_input(
 st.session_state.categories_str = cat_input
 
 if st.button("Scan Today's News"):
-    with st.spinner("Scraping VnExpress & calling LLM..."):
+    status_container = st.empty()
+    with st.spinner("Scraping news & calling LLM..."):
+        status_container.info("Step 1: Scraping news sites...")
         articles = run_scan(
             st.secrets["GROQ_API_KEY"],
-            st.secrets.get("GCP_SERVICE_ACCOUNT"),
+            hf_token,
+            hf_repo_id,
             categories_str=st.session_state.get("categories_str", "")
         )
         st.session_state.articles = articles
 
-    st.success("Feed refreshed from web + LLM and cached to Google Sheets.")
+    if not articles:
+        st.warning("Scan complete, but no articles matched your categories among the top 10 checked.")
+    else:
+        st.success(f"Successfully found {len(articles)} matching articles and saved to Hugging Face.")
+    
+    st.session_state.view = "list"
+    st.session_state.selected_index = None
     st.session_state.view = "list"
     st.session_state.selected_index = None
 

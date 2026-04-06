@@ -1,140 +1,117 @@
 """
 Scan pipeline for AI & War News Scout.
 No Streamlit dependency; used by app.py and run_scan.py CLI.
+Using Hugging Face Hub for storage instead of Google Sheets.
 """
 import json
 import logging
+import io
+import random
+import re
 from typing import List, Dict, Any, Optional
 
 import requests
+import pandas as pd
 from bs4 import BeautifulSoup
 from groq import Groq
-import gspread
-from google.oauth2.service_account import Credentials
+from huggingface_hub import hf_hub_download, upload_file
 
 logger = logging.getLogger(__name__)
 
-GOOGLE_SHEET_ID = "1VrcsNcyws6wh3ioP9Q_ZNS3PpS1UcbcXZRq3sUxFXvI"
-GOOGLE_SHEET_RANGE = "Sheet1"
-GOOGLE_SHEET_CONFIG_RANGE = "Config"
+HF_DATASET_ID = "sonpham172/news-data" # Default, should be configurable
+HF_FILENAME = "news.csv"
 
-
-def get_gsheet_client(service_account_info: dict) -> gspread.Client:
+def load_cached_articles(hf_token: str, repo_id: str) -> List[Dict[str, Any]]:
     """
-    Create an authenticated gspread client from a service account info dict.
-    """
-    if not service_account_info:
-        raise RuntimeError(
-            "GCP_SERVICE_ACCOUNT is required. "
-            "Provide your Google service account config as a dict."
-        )
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive",
-    ]
-    creds = Credentials.from_service_account_info(service_account_info, scopes=scopes)
-    return gspread.authorize(creds)
-
-
-def load_cached_articles(service_account_info: dict) -> List[Dict[str, Any]]:
-    """
-    Load previously saved articles from the Google Sheet.
+    Load previously saved articles from Hugging Face Hub CSV file.
     Returns a list of dicts with keys: title, link, summary, image_url, source.
     """
     try:
-        client = get_gsheet_client(service_account_info)
-        sh = client.open_by_key(GOOGLE_SHEET_ID)
-        try:
-            ws = sh.worksheet(GOOGLE_SHEET_RANGE)
-        except gspread.WorksheetNotFound:
-            ws = sh.sheet1
-
-        rows = ws.get_all_records()
-        articles: List[Dict[str, Any]] = []
-        for row in rows:
-            articles.append(
-                {
-                    "title": row.get("title") or row.get("Title") or "",
-                    "link": row.get("link") or row.get("Link") or "",
-                    "summary": row.get("summary") or row.get("Summary") or "",
-                    "image_url": row.get("image_url") or row.get("Image") or "",
-                    "source": row.get("source") or row.get("Source") or "",
-                }
-            )
-        return articles
+        if not hf_token or not repo_id:
+            return []
+            
+        file_path = hf_hub_download(
+            repo_id=repo_id,
+            filename=HF_FILENAME,
+            repo_type="dataset",
+            token=hf_token
+        )
+        df = pd.read_csv(file_path)
+        # Convert NaN to empty strings for consistency
+        df = df.fillna("")
+        return df.to_dict('records')
     except Exception as e:
-        logger.warning("Could not load cached data from Google Sheet: %s", e)
+        logger.warning("Could not load cached data from Hugging Face: %s", e)
         return []
 
-
-def load_config_from_sheet(service_account_info: dict) -> str:
-    """Load the last searched category from the Config sheet."""
+def load_config_from_hf(hf_token: str, repo_id: str) -> str:
+    """Load the last searched category from a config file on HF (simulating the Config sheet)."""
     try:
-        client = get_gsheet_client(service_account_info)
-        sh = client.open_by_key(GOOGLE_SHEET_ID)
-        try:
-            ws = sh.worksheet(GOOGLE_SHEET_CONFIG_RANGE)
-        except gspread.WorksheetNotFound:
+        if not hf_token or not repo_id:
             return ""
-        
-        records = ws.get_all_records()
-        for row in records:
-            if row.get("Key") == "categories":
-                return str(row.get("Value") or "")
-        return ""
+            
+        # We can store config in a separate file or a special row in the CSV
+        # For simplicity, let's try to load config.json if it exists
+        file_path = hf_hub_download(
+            repo_id=repo_id,
+            filename="config.json",
+            repo_type="dataset",
+            token=hf_token
+        )
+        with open(file_path, 'r') as f:
+            config = json.load(f)
+            return config.get("categories", "")
     except Exception as e:
-        logger.warning("Could not load config from Google Sheet: %s", e)
+        logger.info("Could not load config from HF (expected if first run): %s", e)
         return ""
 
-
-def save_config_to_sheet(categories_str: str, service_account_info: dict) -> None:
-    """Save the current categories string to the Config sheet."""
+def save_config_to_hf(categories_str: str, hf_token: str, repo_id: str) -> None:
+    """Save the current categories string to config.json on HF."""
     try:
-        client = get_gsheet_client(service_account_info)
-        sh = client.open_by_key(GOOGLE_SHEET_ID)
-        try:
-            ws = sh.worksheet(GOOGLE_SHEET_CONFIG_RANGE)
-        except gspread.WorksheetNotFound:
-            ws = sh.add_worksheet(title=GOOGLE_SHEET_CONFIG_RANGE, rows="10", cols="2")
+        if not hf_token or not repo_id:
+            return
+            
+        config = {"categories": categories_str}
+        config_json = json.dumps(config)
         
-        ws.clear()
-        ws.update("A1", [["Key", "Value"], ["categories", categories_str]])
+        upload_file(
+            path_or_fileobj=io.BytesIO(config_json.encode()),
+            path_in_repo="config.json",
+            repo_id=repo_id,
+            repo_type="dataset",
+            token=hf_token
+        )
     except Exception as e:
-        logger.warning("Could not save config to Google Sheet: %s", e)
+        logger.warning("Could not save config to HF: %s", e)
 
-
-def save_articles_to_sheet(
-    articles: List[Dict[str, Any]], service_account_info: dict
+def save_articles_to_hf(
+    articles: List[Dict[str, Any]], hf_token: str, repo_id: str
 ) -> None:
     """
-    Save the given list of article dicts into the Google Sheet,
+    Save the given list of article dicts into Hugging Face Hub as a CSV,
     overwriting existing content.
     """
     try:
-        client = get_gsheet_client(service_account_info)
-        sh = client.open_by_key(GOOGLE_SHEET_ID)
-        try:
-            ws = sh.worksheet(GOOGLE_SHEET_RANGE)
-        except gspread.WorksheetNotFound:
-            ws = sh.add_worksheet(title=GOOGLE_SHEET_RANGE, rows="1000", cols="5")
+        if not hf_token or not repo_id:
+            return
 
-        header = ["title", "link", "summary", "image_url", "source"]
-        values = [header]
-        for a in articles:
-            values.append(
-                [
-                    a.get("title", ""),
-                    a.get("link", ""),
-                    a.get("summary", ""),
-                    a.get("image_url", ""),
-                    a.get("source", ""),
-                ]
-            )
+        if not articles:
+            return
 
-        ws.clear()
-        ws.update("A1", values)
+        df = pd.DataFrame(articles)
+        csv_buffer = io.BytesIO()
+        df.to_csv(csv_buffer, index=False)
+        csv_buffer.seek(0)
+
+        upload_file(
+            path_or_fileobj=csv_buffer,
+            path_in_repo=HF_FILENAME,
+            repo_id=repo_id,
+            repo_type="dataset",
+            token=hf_token
+        )
     except Exception as e:
-        logger.warning("Could not save data to Google Sheet: %s", e)
+        logger.warning("Could not save data to HF: %s", e)
 
 
 def scrape_vnexpress() -> List[Dict[str, str]]:
@@ -248,54 +225,75 @@ def ai_filter_news(raw_news: List[Dict[str, str]], groq_client: Groq, categories
     """Use Groq LLM to filter raw news based on categories; return list of dicts with title, link, summary, image_url, source."""
     target_topics = categories_str if categories_str else "Artificial Intelligence (AI) or Iran/US conflict"
     
-    # Limit raw_news to avoid hitting token limits
-    limited_raw_news = raw_news[:10]  # Take the first 10 articles
+    # To ensure diversity across sites and categories, shuffle the results
+    # before taking the discovery pool.
+    shuffled_news = list(raw_news)
+    random.shuffle(shuffled_news)
+    
+    # To save tokens while searching more articles, we only send titles and IDs to the AI
+    # Per user requirement: keep limit scan articles to less than 30
+    discovery_pool = shuffled_news[:25]
+    simplified_news = [{"id": i, "title": n["title"]} for i, n in enumerate(discovery_pool)]
 
     prompt = (
-        "From the following list of news items (each with title, link, image_url, source), "
-        f"identify only stories related to: {target_topics}.\n\n"
-        f"NEWS_LIST:\n{limited_raw_news}\n\n"
-        "For each selected story, create a brief summary (1-2 sentences).\n"
-        "Return ONLY a valid JSON array (no markdown, no explanation) with this shape:\n"
-        "[{\"title\": \"...\", \"link\": \"...\", \"summary\": \"...\", \"image_url\": \"...\", \"source\": \"...\"}]"
+        f"You are a news curator. Given these titles, pick up to 10 that best match: {target_topics}.\n\n"
+        f"TITLES:\n{json.dumps(simplified_news, ensure_ascii=False)}\n\n"
+        "For each selected item, return a JSON object with 'id' and 'summary' (a brief 1-2 sentence summary based on the title).\n"
+        "Return ONLY a valid JSON array. Example: [{\"id\": 0, \"summary\": \"...\"}]"
     )
-
-    completion = groq_client.chat.completions.create(
-        model="llama-3.1-8b-instant", # Changed to llama-3.1-8b-instant as per user request
-        messages=[{"role": "user", "content": prompt}],
-    )
-    content = completion.choices[0].message.content.strip()
-
-    if content.startswith("```"):
-        lines = content.splitlines()
-        content = "\n".join(line for line in lines if not line.strip().startswith("```"))
 
     try:
-        data = json.loads(content)
-        if isinstance(data, list):
-            return data
-    except json.JSONDecodeError:
-        pass
+        completion = groq_client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1,
+        )
+        content = completion.choices[0].message.content.strip()
 
-    return []
+        # Robust JSON extraction
+        match = re.search(r'\[\s*\{.*\}\s*\]', content, re.DOTALL)
+        if match:
+            json_str = match.group(0)
+            selected_items = json.loads(json_str)
+        else:
+            # Fallback if regex fails but maybe it's raw JSON
+            try:
+                selected_items = json.loads(content)
+            except json.JSONDecodeError:
+                logger.warning("AI returned invalid format: %s", content)
+                return []
+        
+        filtered_articles = []
+        for item in selected_items:
+            idx = item.get("id")
+            if idx is not None and 0 <= idx < len(discovery_pool):
+                article = discovery_pool[idx].copy()
+                article["summary"] = item.get("summary", "")
+                filtered_articles.append(article)
+        
+        return filtered_articles
+    except Exception as e:
+        logger.error("AI filtering failed: %s", e)
+        return []
 
 
 def run_scan(
     groq_api_key: str,
-    gcp_service_account: dict,
+    hf_token: str,
+    hf_repo_id: str,
     categories_str: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
-    Run the full scan pipeline: scrape VNExpress, filter with LLM, save to Google Sheet.
-    Returns the list of articles. Raises on missing config; logs warnings for sheet I/O errors.
+    Run the full scan pipeline: scrape news, filter with LLM, save to Hugging Face Hub.
+    Returns the list of articles.
     """
     if not groq_api_key:
         raise RuntimeError("GROQ_API_KEY is required.")
-    if not gcp_service_account:
-        raise RuntimeError("GCP_SERVICE_ACCOUNT is required.")
+    if not hf_token:
+        raise RuntimeError("HF_TOKEN is required.")
 
     if categories_str is None:
-        categories_str = load_config_from_sheet(gcp_service_account)
+        categories_str = load_config_from_hf(hf_token, hf_repo_id)
 
     client = Groq(api_key=groq_api_key)
     
@@ -305,7 +303,7 @@ def run_scan(
     all_raw_data.extend(scrape_cafef())
     
     articles = ai_filter_news(all_raw_data, client, categories_str)
-    save_articles_to_sheet(articles, gcp_service_account)
+    save_articles_to_hf(articles, hf_token, hf_repo_id)
     if categories_str is not None:
-        save_config_to_sheet(categories_str, gcp_service_account)
+        save_config_to_hf(categories_str, hf_token, hf_repo_id)
     return articles
